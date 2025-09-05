@@ -12,9 +12,11 @@ const Call = () => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [device, setDevice] = useState(null);
   const [activeConnection, setActiveConnection] = useState(null);
+  const [incomingCall, setIncomingCall] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [currentUserId, setCurrentUserId] = useState(null);
 
+  // Fetch all users
   useEffect(() => {
     const fetchUsers = async () => {
       try {
@@ -28,12 +30,14 @@ const Call = () => {
     fetchUsers();
   }, []);
 
+  // Handle online users from socket
   useEffect(() => {
     if (!socket) return;
     socket.on("onlineUsers", (users) => setOnlineUsers(users));
     return () => socket.off("onlineUsers");
   }, [socket]);
 
+  // Setup Twilio Device
   useEffect(() => {
     const setupDevice = async () => {
       try {
@@ -51,17 +55,10 @@ const Call = () => {
           console.log("Twilio Device is registered")
         );
 
+        // Incoming call event
         twilioDevice.on("incoming", (call) => {
-          toast.success("Incoming call!");
-          call.accept();
-          setActiveConnection(call);
-
-          call.on("disconnect", () => {
-            toast("Call ended");
-            setActiveConnection(null);
-            setSelectedUser(null);
-            setIsMuted(false);
-          });
+          toast("Incoming call...");
+          setIncomingCall(call);
         });
 
         twilioDevice.on("error", (err) =>
@@ -78,41 +75,76 @@ const Call = () => {
     setupDevice();
   }, []);
 
-  const handleCall = (recId) => {
+  // Start outgoing call
+  const handleCall = async (recId) => {
     if (!device) {
       toast.error("Call device not ready");
       return;
     }
 
-    const conn = device.connect({ params: { To: recId } });
-    setActiveConnection(conn);
-    setSelectedUser(recId);
+    try {
+      const conn = await device.connect({ params: { To: recId } }); // ✅ await
+      setActiveConnection(conn);
+      setSelectedUser(recId);
 
-    conn.on("accept", () => toast.success(`In call with ${recId}`));
-    conn.on("disconnect", () => {
-      toast("Call ended");
-      setActiveConnection(null);
-      setSelectedUser(null);
-      setIsMuted(false);
-    });
-  };
-
-  const handleEndCall = () => {
-    if (activeConnection) {
-      activeConnection.disconnect();
-      setActiveConnection(null);
-      setSelectedUser(null);
-      setIsMuted(false);
-      toast("Call ended");
+      conn.on("accept", () => toast.success(`In call with ${recId}`));
+      conn.on("disconnect", () => {
+        toast("Call ended");
+        cleanupCallState();
+      });
+    } catch (err) {
+      console.error("Call failed:", err);
+      toast.error("Failed to start call");
     }
   };
 
+  // Answer incoming call
+  const handleAnswerCall = () => {
+    if (!incomingCall) return;
+    incomingCall.accept();
+    setActiveConnection(incomingCall);
+    setSelectedUser(incomingCall.parameters.From);
+    setIncomingCall(null);
+
+    incomingCall.on("disconnect", () => {
+      toast("Call ended");
+      cleanupCallState();
+    });
+
+    toast.success("Call answered");
+  };
+
+  // Reject incoming call
+  const handleRejectCall = () => {
+    if (!incomingCall) return;
+    incomingCall.reject();
+    setIncomingCall(null);
+    toast("Call rejected");
+  };
+
+  // End active call
+  const handleEndCall = () => {
+    if (activeConnection) {
+      activeConnection.disconnect();
+      toast("Call ended");
+    }
+    cleanupCallState();
+  };
+
+  // Toggle mute
   const handleMuteToggle = () => {
     if (!activeConnection) return;
     const newMuteState = !isMuted;
     activeConnection.mute(newMuteState);
     setIsMuted(newMuteState);
     toast(newMuteState ? "Muted" : "Unmuted");
+  };
+
+  // Reset call state
+  const cleanupCallState = () => {
+    setActiveConnection(null);
+    setSelectedUser(null);
+    setIsMuted(false);
   };
 
   return (
@@ -148,7 +180,19 @@ const Call = () => {
       </div>
 
       <div className="call-box">
-        {selectedUser ? (
+        {incomingCall ? (
+          <>
+            <h2>Incoming Call...</h2>
+            <div className="call-controls">
+              <button className="answer-btn" onClick={handleAnswerCall}>
+                Answer
+              </button>
+              <button className="reject-btn" onClick={handleRejectCall}>
+                Reject
+              </button>
+            </div>
+          </>
+        ) : selectedUser ? (
           <>
             <h2>In Call with {selectedUser}</h2>
             <div className="call-controls">
