@@ -1,0 +1,127 @@
+.call-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 20px;
+  padding: 20px;
+  min-height: 80vh;
+  background: #f9fafb;
+  color: #333;
+  font-family: Arial, sans-serif;
+}
+
+.users-section,
+.online-section {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  padding: 15px;
+}
+
+.users-section h3,
+.online-section h3 {
+  margin-bottom: 10px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 5px;
+}
+
+.users-section ul,
+.online-section ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.users-section li,
+.online-section li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 6px;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 0.95rem;
+}
+
+.online-user span {
+  font-weight: 500;
+  color: #2c3e50;
+}
+
+.call-btn {
+  background: #4cafef;
+  border: none;
+  border-radius: 50%;
+  color: white;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 8px;
+  transition: background 0.2s ease;
+}
+
+.call-btn:hover {
+  background: #3498db;
+}
+
+.call-box {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.call-box h2 {
+  margin-bottom: 20px;
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.call-controls {
+  display: flex;
+  gap: 15px;
+}
+
+.call-controls button {
+  padding: 10px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.end-btn {
+  background: #e74c3c;
+  color: #fff;
+}
+.end-btn:hover {
+  background: #c0392b;
+}
+
+.mute-btn {
+  background: #f1c40f;
+  color: #333;
+}
+.mute-btn:hover {
+  background: #d4ac0d;
+}
+
+.video-btn {
+  background: #2ecc71;
+  color: #fff;
+}
+.video-btn:hover {
+  background: #27ae60;
+}
+
+@media (max-width: 900px) {
+  .call-container {
+    grid-template-columns: 1fr;
+  }
+}
