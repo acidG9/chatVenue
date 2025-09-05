@@ -35,7 +35,9 @@ function App() {
         if (res.data.valid) {
           const user = localStorage.getItem("user");
 
-          newSocket = io("http://localhost:8000", { auth: { token } });
+          newSocket = io("https://chatvenue.onrender.com/", {
+            auth: { token },
+          });
           setSocket(newSocket);
 
           newSocket.emit("userOnline", user);
