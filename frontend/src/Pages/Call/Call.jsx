@@ -15,6 +15,7 @@ const Call = () => {
   const [incomingCall, setIncomingCall] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [currentUserId, setCurrentUserId] = useState(null);
+  const [isDeviceReady, setIsDeviceReady] = useState(false);
 
   // Fetch all users
   useEffect(() => {
@@ -37,43 +38,58 @@ const Call = () => {
     return () => socket.off("onlineUsers");
   }, [socket]);
 
-  // Setup Twilio Device
-  useEffect(() => {
-    const setupDevice = async () => {
-      try {
-        const tokenRes = await API.get("/token/voice");
-        const token = tokenRes.data.token;
+  // Setup Twilio Device (called only after button click)
+  const setupDevice = async () => {
+    try {
+      console.log("setupDevice called");
 
-        setCurrentUserId(tokenRes.data.identity);
+      const tokenRes = await API.get("/token/voice");
+      const token = tokenRes.data.token;
 
-        const twilioDevice = new Device(token, {
-          codecPreferences: ["opus", "pcmu"],
-          debug: true,
-        });
+      setCurrentUserId(tokenRes.data.identity);
 
-        twilioDevice.on("registered", () =>
-          console.log("Twilio Device is registered")
-        );
+      console.log("Got token:", tokenRes.data.identity);
 
-        // Incoming call event
-        twilioDevice.on("incoming", (call) => {
-          toast("Incoming call...");
-          setIncomingCall(call);
-        });
+      const twilioDevice = new Device(token, {
+        codecPreferences: ["opus", "pcmu"],
+        debug: true,
+      });
 
-        twilioDevice.on("error", (err) =>
-          console.error("Twilio Device error:", err)
-        );
+      console.log(1);
 
-        setDevice(twilioDevice);
-      } catch (err) {
-        console.error("Error setting up Twilio Device:", err);
-        toast.error("Failed to setup call device");
-      }
-    };
+      twilioDevice.on("registered", () => {
+        console.log("is this coming");
+        console.log("Twilio Device is registered");
+      });
 
-    setupDevice();
-  }, []);
+      console.log(2);
+
+      // Incoming call event
+      twilioDevice.on("incoming", (call) => {
+        console.log("Incoming call event fired");
+        toast("Incoming call...");
+        setIncomingCall(call);
+      });
+
+      console.log(3);
+
+      twilioDevice.on("error", (err) =>
+        console.error("Twilio Device error:", err)
+      );
+
+      // IMPORTANT: register the device with Twilio
+      await twilioDevice.register();
+      console.log("Device.register() finished");
+
+      setDevice(twilioDevice);
+      setIsDeviceReady(true);
+
+      console.log(4);
+    } catch (err) {
+      console.error("Error setting up Twilio Device:", err);
+      toast.error("Failed to setup call device");
+    }
+  };
 
   // Start outgoing call
   const handleCall = async (recId) => {
@@ -83,15 +99,19 @@ const Call = () => {
     }
 
     try {
-      const conn = await device.connect({ params: { To: recId } }); // ✅ await
+      console.log(5);
+      const conn = await device.connect({ params: { To: recId } });
       setActiveConnection(conn);
       setSelectedUser(recId);
+
+      console.log(6);
 
       conn.on("accept", () => toast.success(`In call with ${recId}`));
       conn.on("disconnect", () => {
         toast("Call ended");
         cleanupCallState();
       });
+      console.log(7);
     } catch (err) {
       console.error("Call failed:", err);
       toast.error("Failed to start call");
@@ -100,11 +120,14 @@ const Call = () => {
 
   // Answer incoming call
   const handleAnswerCall = () => {
+    console.log(8);
     if (!incomingCall) return;
     incomingCall.accept();
     setActiveConnection(incomingCall);
     setSelectedUser(incomingCall.parameters.From);
     setIncomingCall(null);
+
+    console.log(9);
 
     incomingCall.on("disconnect", () => {
       toast("Call ended");
@@ -149,6 +172,14 @@ const Call = () => {
 
   return (
     <div className="call-container">
+      {!isDeviceReady && (
+        <div className="setup-box">
+          <button onClick={setupDevice} className="setup-btn">
+            Enable Calling
+          </button>
+        </div>
+      )}
+
       <div className="users-section">
         <h3>All Users</h3>
         <ul>
@@ -171,6 +202,7 @@ const Call = () => {
                 <button
                   className="call-btn"
                   onClick={() => handleCall(user._id)}
+                  disabled={!isDeviceReady}
                 >
                   📞
                 </button>
