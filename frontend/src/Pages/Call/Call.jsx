@@ -243,6 +243,8 @@ const Call = () => {
         }
       };
 
+      console.log(transcript);
+
       recognizer.startContinuousRecognitionAsync();
       recognizerRef.current = recognizer;
       toast("Speech recognition started");
