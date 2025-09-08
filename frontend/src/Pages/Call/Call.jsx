@@ -16,15 +16,12 @@ const Call = () => {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(true);
-
   const [transcript, setTranscript] = useState("");
-  const recognizersRef = useRef({}); // store multiple recognizers
 
+  const recognizersRef = useRef({});
+  const trackSpeakerMap = useRef({});
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-
-  // Map to track which MediaStreamTrack belongs to which speaker
-  const trackSpeakerMap = useRef({});
 
   // Fetch all users
   useEffect(() => {
@@ -40,23 +37,21 @@ const Call = () => {
     fetchUsers();
   }, []);
 
-  // Handle online users from socket
+  // Online users from socket
   useEffect(() => {
     if (!socket) return;
     socket.on("onlineUsers", (users) => setOnlineUsers(users));
     return () => socket.off("onlineUsers");
   }, [socket]);
 
-  // Helper: attach track(s) to a container
+  // Helper: attach track(s) to container
   const attachTracks = (tracks = [], container) => {
     if (!container) return;
     tracks.forEach((track) => {
       const attached = track.attach();
-      if (Array.isArray(attached)) {
+      if (Array.isArray(attached))
         attached.forEach((el) => container.appendChild(el));
-      } else if (attached) {
-        container.appendChild(attached);
-      }
+      else if (attached) container.appendChild(attached);
     });
   };
 
@@ -66,20 +61,21 @@ const Call = () => {
       try {
         const elems = track.detach();
         elems.forEach((el) => el.remove());
-      } catch (err) {
-        console.log(err);
+      } catch (e) {
+        console.log(e);
       }
-      if (typeof track.stop === "function") {
-        try {
-          track.stop();
-        } catch (err) {
-          console.log(err);
-        }
-      }
+      if (typeof track.stop === "function") track.stop?.();
     });
   };
 
-  // Build deterministic room name so both peers join same room
+  // Map user ID to name
+  const getUserNameById = (id) => {
+    if (id === currentUserId) return "You";
+    const user = allUsers.find((u) => u._id === id);
+    return user?.name || "Unknown";
+  };
+
+  // Deterministic room name
   const getRoomName = (myId, otherId) => {
     if (!myId) return `${otherId}`;
     const pair = [myId.toString(), otherId.toString()].sort();
@@ -94,9 +90,9 @@ const Call = () => {
       const identity = tokenRes.data.identity;
 
       setCurrentUserId(identity);
+      setSelectedUser(recId);
 
       const roomName = getRoomName(identity, recId);
-      setSelectedUser(recId);
 
       const connectedRoom = await Video.connect(token, {
         name: roomName,
@@ -110,42 +106,39 @@ const Call = () => {
       setRoom(connectedRoom);
       toast.success(`Connected to room: ${roomName}`);
 
-      // Add local tracks
-      connectedRoom.localParticipant.tracks.forEach((publication) => {
-        const track = publication.track;
+      // Local participant
+      connectedRoom.localParticipant.tracks.forEach((pub) => {
+        const track = pub.track;
         if (track) {
           attachTracks([track], localVideoRef.current);
-          if (track.kind === "audio") {
+          if (track.kind === "audio")
             trackSpeakerMap.current[track.mediaStreamTrack.id] = "You";
-          }
         }
       });
 
-      // Subscribe remote
+      // Remote participant handling
       const subscribeParticipantTracks = (participant) => {
         participant.tracks.forEach((pub) => {
-          if (pub.track) {
-            attachTracks([pub.track], remoteVideoRef.current);
-            if (pub.kind === "audio") {
-              trackSpeakerMap.current[pub.track.mediaStreamTrack.id] =
-                participant.identity;
-            }
+          const track = pub.track;
+          if (track) {
+            attachTracks([track], remoteVideoRef.current);
+            if (track.kind === "audio")
+              trackSpeakerMap.current[track.mediaStreamTrack.id] =
+                getUserNameById(participant.identity);
           }
         });
 
         participant.on("trackSubscribed", (track) => {
           attachTracks([track], remoteVideoRef.current);
-          if (track.kind === "audio") {
+          if (track.kind === "audio")
             trackSpeakerMap.current[track.mediaStreamTrack.id] =
-              participant.identity;
-          }
+              getUserNameById(participant.identity);
         });
 
         participant.on("trackUnsubscribed", (track) => {
           detachTracks([track]);
-          if (track.kind === "audio") {
+          if (track.kind === "audio")
             delete trackSpeakerMap.current[track.mediaStreamTrack.id];
-          }
         });
       };
 
@@ -159,14 +152,12 @@ const Call = () => {
       });
 
       connectedRoom.on("disconnected", (roomObj) => {
-        roomObj.localParticipant.tracks.forEach((publication) => {
-          if (publication.track) detachTracks([publication.track]);
-        });
-        roomObj.participants.forEach((participant) => {
-          participant.tracks.forEach((pub) => {
-            if (pub.track) detachTracks([pub.track]);
-          });
-        });
+        roomObj.localParticipant.tracks.forEach(
+          (pub) => pub.track && detachTracks([pub.track])
+        );
+        roomObj.participants.forEach((p) =>
+          p.tracks.forEach((pub) => pub.track && detachTracks([pub.track]))
+        );
 
         if (localVideoRef.current) localVideoRef.current.innerHTML = "";
         if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
@@ -186,59 +177,40 @@ const Call = () => {
 
   // End call
   const handleEndCall = () => {
-    if (room) {
-      try {
-        room.disconnect();
-        toast("Call ended");
-      } catch (err) {
-        console.error("Error ending call:", err);
-      }
-    }
-
-    // Stop all recognizers
-    Object.values(recognizersRef.current).forEach((rec) => {
-      rec.stopContinuousRecognitionAsync();
-    });
+    if (room) room.disconnect();
+    Object.values(recognizersRef.current).forEach((rec) =>
+      rec.stopContinuousRecognitionAsync()
+    );
     recognizersRef.current = {};
     setTranscript("");
     trackSpeakerMap.current = {};
+    toast("Call ended");
   };
 
   // Toggle mute/unmute
   const handleMuteToggle = () => {
     if (!room) return;
     const newMute = !isMuted;
-    room.localParticipant.audioTracks.forEach((pub) => {
-      const track = pub.track;
-      if (!track) return;
-      try {
-        newMute ? track.disable() : track.enable();
-      } catch (err) {
-        console.warn("Audio toggle error:", err);
-      }
-    });
+    room.localParticipant.audioTracks.forEach(
+      (pub) => pub.track && (newMute ? pub.track.disable() : pub.track.enable())
+    );
     setIsMuted(newMute);
     toast(newMute ? "Muted" : "Unmuted");
   };
 
-  // Toggle camera on/off
+  // Toggle camera
   const handleCameraToggle = () => {
     if (!room) return;
     const newState = !isCameraOn;
-    room.localParticipant.videoTracks.forEach((pub) => {
-      const track = pub.track;
-      if (!track) return;
-      try {
-        newState ? track.enable() : track.disable();
-      } catch (err) {
-        console.warn("Video toggle error:", err);
-      }
-    });
+    room.localParticipant.videoTracks.forEach(
+      (pub) =>
+        pub.track && (newState ? pub.track.enable() : pub.track.disable())
+    );
     setIsCameraOn(newState);
     toast(newState ? "Camera On" : "Camera Off");
   };
 
-  // Start speech recognition per track with labels
+  // Start speech recognition
   const startSpeechRecognition = async () => {
     try {
       const { data } = await API.get("/token/speech");
@@ -248,17 +220,17 @@ const Call = () => {
       );
       speechConfig.speechRecognitionLanguage = "en-US";
 
-      // All audio tracks from local + remote participants
       const audioTracks = [];
       if (room) {
-        room.localParticipant.audioTracks.forEach((pub) => {
-          if (pub.track) audioTracks.push(pub.track);
-        });
-        room.participants.forEach((participant) => {
-          participant.tracks.forEach((pub) => {
-            if (pub.track && pub.kind === "audio") audioTracks.push(pub.track);
-          });
-        });
+        room.localParticipant.audioTracks.forEach(
+          (pub) => pub.track && audioTracks.push(pub.track)
+        );
+        room.participants.forEach((p) =>
+          p.tracks.forEach(
+            (pub) =>
+              pub.track && pub.kind === "audio" && audioTracks.push(pub.track)
+          )
+        );
       }
 
       if (audioTracks.length === 0) {
@@ -266,7 +238,6 @@ const Call = () => {
         return;
       }
 
-      // Create recognizer per track
       for (const track of audioTracks) {
         if (recognizersRef.current[track.mediaStreamTrack.id]) continue;
 
@@ -280,7 +251,6 @@ const Call = () => {
         const audioConfig = SpeechSDK.AudioConfig.fromStreamInput(
           destination.stream
         );
-
         const recognizer = new SpeechSDK.SpeechRecognizer(
           speechConfig,
           audioConfig
@@ -290,26 +260,24 @@ const Call = () => {
           trackSpeakerMap.current[track.mediaStreamTrack.id] || "Unknown";
 
         recognizer.recognizing = (_, e) => {
-          if (e.result.reason === SpeechSDK.ResultReason.RecognizingSpeech) {
+          if (e.result.reason === SpeechSDK.ResultReason.RecognizingSpeech)
             setTranscript(
               (prev) => prev + ` [${speakerName}] ${e.result.text}`
             );
-          }
         };
 
         recognizer.recognized = (_, e) => {
-          if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+          if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech)
             setTranscript(
               (prev) => prev + ` [${speakerName}] ${e.result.text}`
             );
-          }
         };
 
         recognizer.startContinuousRecognitionAsync();
         recognizersRef.current[track.mediaStreamTrack.id] = recognizer;
       }
 
-      toast("Speech recognition started with speaker labels");
+      toast("Speech recognition started");
     } catch (err) {
       console.error("Speech recognition error:", err);
       toast.error("Speech recognition failed");
@@ -352,7 +320,7 @@ const Call = () => {
       <div className="call-box">
         {room ? (
           <>
-            <h2>In Video Call with {selectedUser}</h2>
+            <h2>In Video Call with {getUserNameById(selectedUser)}</h2>
             <div className="video-wrapper">
               <div className="local-video" ref={localVideoRef}></div>
               <div className="remote-video" ref={remoteVideoRef}></div>
