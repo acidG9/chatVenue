@@ -17,6 +17,7 @@ const Call = () => {
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(true);
   const [transcript, setTranscript] = useState("");
+  const [summary, setSummary] = useState("");
 
   const recognizersRef = useRef({});
   const trackSpeakerMap = useRef({});
@@ -183,6 +184,7 @@ const Call = () => {
     );
     recognizersRef.current = {};
     setTranscript("");
+    setSummary("");
     trackSpeakerMap.current = {};
     toast("Call ended");
   };
@@ -284,6 +286,21 @@ const Call = () => {
     }
   };
 
+  const getTranscriptSummary = async () => {
+    if (!transcript.trim()) {
+      toast.error("Transcript is empty");
+      return;
+    }
+    try {
+      const res = await API.post("/token/summary", { transcript });
+      setSummary(res.data.summary);
+      toast.success("Summary generated!");
+    } catch (err) {
+      console.error("Summary error:", err);
+      toast.error("Failed to generate summary");
+    }
+  };
+
   return (
     <div className="call-container">
       <div className="users-section">
@@ -338,11 +355,20 @@ const Call = () => {
               <button className="speech-btn" onClick={startSpeechRecognition}>
                 Start Speech
               </button>
+              <button className="summary-btn" onClick={getTranscriptSummary}>
+                Get Summary
+              </button>
             </div>
             <div className="transcript-box">
               <h4>Transcript</h4>
               <p>{transcript}</p>
             </div>
+            {summary && (
+              <div className="summary-box">
+                <h4>Summary</h4>
+                <p>{summary}</p>
+              </div>
+            )}
           </>
         ) : (
           <h2>No Active Call</h2>
