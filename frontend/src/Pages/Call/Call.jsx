@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import API from "../../axios";
 import { useSocket } from "../../context/SocketContext";
 import Video from "twilio-video";
+import * as SpeechSDK from "microsoft-cognitiveservices-speech-sdk";
 import toast from "react-hot-toast";
 import "./Call.css";
 
@@ -15,6 +16,9 @@ const Call = () => {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(true);
+
+  const [transcript, setTranscript] = useState("");
+  const recognizerRef = useRef(null);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -45,7 +49,6 @@ const Call = () => {
     if (!container) return;
     tracks.forEach((track) => {
       const attached = track.attach();
-      // attach() can return an element or an array
       if (Array.isArray(attached)) {
         attached.forEach((el) => container.appendChild(el));
       } else if (attached) {
@@ -61,14 +64,12 @@ const Call = () => {
         const elems = track.detach();
         elems.forEach((el) => el.remove());
       } catch (err) {
-        // ignore if detach fails
         console.log(err);
       }
       if (typeof track.stop === "function") {
         try {
           track.stop();
         } catch (err) {
-          // ignore
           console.log(err);
         }
       }
@@ -77,25 +78,21 @@ const Call = () => {
 
   // Build deterministic room name so both peers join same room
   const getRoomName = (myId, otherId) => {
-    if (!myId) return `${otherId}`; // fallback
+    if (!myId) return `${otherId}`;
     const pair = [myId.toString(), otherId.toString()].sort();
     return `${pair[0]}_${pair[1]}`;
   };
 
-  // Start video call (caller side)
+  // Start video call
   const startVideoCall = async (recId) => {
     try {
-      // Request a token (no room param required)
       const tokenRes = await API.get("/token/video");
       const token = tokenRes.data.token;
       const identity = tokenRes.data.identity;
 
-      // Save identity (fixes earlier eslint unused setCurrentUserId)
       setCurrentUserId(identity);
 
-      // deterministic room name so both parties can join same room
       const roomName = getRoomName(identity, recId);
-
       setSelectedUser(recId);
 
       const connectedRoom = await Video.connect(token, {
@@ -104,33 +101,28 @@ const Call = () => {
         video: { width: 640 },
       });
 
-      // Clear any previous UI
       if (localVideoRef.current) localVideoRef.current.innerHTML = "";
       if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
 
       setRoom(connectedRoom);
       toast.success(`Connected to room: ${roomName}`);
 
-      // attach local participant's existing tracks
       connectedRoom.localParticipant.tracks.forEach((publication) => {
         const track = publication.track;
         if (track) attachTracks([track], localVideoRef.current);
       });
 
-      // attach tracks of participants already in the room
       connectedRoom.participants.forEach((participant) => {
         participant.tracks.forEach((pub) => {
           if (pub.track) attachTracks([pub.track], remoteVideoRef.current);
         });
 
-        // subscribe to future track events
         participant.on("trackSubscribed", (track) =>
           attachTracks([track], remoteVideoRef.current)
         );
         participant.on("trackUnsubscribed", (track) => detachTracks([track]));
       });
 
-      // When a new participant connects
       connectedRoom.on("participantConnected", (participant) => {
         participant.tracks.forEach((pub) => {
           if (pub.track) attachTracks([pub.track], remoteVideoRef.current);
@@ -141,28 +133,22 @@ const Call = () => {
         participant.on("trackUnsubscribed", (track) => detachTracks([track]));
       });
 
-      // When a participant disconnects
       connectedRoom.on("participantDisconnected", (participant) => {
         participant.tracks.forEach((pub) => {
           if (pub.track) detachTracks([pub.track]);
         });
       });
 
-      // Cleanup when the room itself disconnects for this client
       connectedRoom.on("disconnected", (roomObj) => {
-        // detach and stop local tracks
         roomObj.localParticipant.tracks.forEach((publication) => {
           if (publication.track) detachTracks([publication.track]);
         });
-
-        // detach remote tracks
         roomObj.participants.forEach((participant) => {
           participant.tracks.forEach((pub) => {
             if (pub.track) detachTracks([pub.track]);
           });
         });
 
-        // clear UI
         if (localVideoRef.current) localVideoRef.current.innerHTML = "";
         if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
 
@@ -181,21 +167,18 @@ const Call = () => {
   const handleEndCall = () => {
     if (room) {
       try {
-        // force disconnect; 'disconnected' handler will clean up tracks/UI
         room.disconnect();
         toast("Call ended");
       } catch (err) {
         console.error("Error ending call:", err);
-        // attempt manual cleanup
-        room.localParticipant.tracks.forEach((pub) => {
-          if (pub.track) detachTracks([pub.track]);
-        });
-        if (localVideoRef.current) localVideoRef.current.innerHTML = "";
-        if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
-        setRoom(null);
-        setSelectedUser(null);
       }
     }
+    // Stop speech recognition too
+    if (recognizerRef.current) {
+      recognizerRef.current.stopContinuousRecognitionAsync();
+      recognizerRef.current = null;
+    }
+    setTranscript("");
   };
 
   // Toggle mute/unmute
@@ -230,6 +213,43 @@ const Call = () => {
     });
     setIsCameraOn(newState);
     toast(newState ? "Camera On" : "Camera Off");
+  };
+
+  // Start speech recognition
+  const startSpeechRecognition = async () => {
+    try {
+      const { data } = await API.get("/token/speech");
+      const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+        data.key,
+        data.region
+      );
+      speechConfig.speechRecognitionLanguage = "en-US";
+
+      const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+      const recognizer = new SpeechSDK.SpeechRecognizer(
+        speechConfig,
+        audioConfig
+      );
+
+      recognizer.recognizing = (_, e) => {
+        if (e.result.reason === SpeechSDK.ResultReason.RecognizingSpeech) {
+          setTranscript((prev) => prev + " " + e.result.text);
+        }
+      };
+
+      recognizer.recognized = (_, e) => {
+        if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+          setTranscript((prev) => prev + " " + e.result.text);
+        }
+      };
+
+      recognizer.startContinuousRecognitionAsync();
+      recognizerRef.current = recognizer;
+      toast("Speech recognition started");
+    } catch (err) {
+      console.error("Speech recognition error:", err);
+      toast.error("Speech recognition failed");
+    }
   };
 
   return (
@@ -283,6 +303,13 @@ const Call = () => {
               <button className="video-btn" onClick={handleCameraToggle}>
                 {isCameraOn ? "Camera Off" : "Camera On"}
               </button>
+              <button className="speech-btn" onClick={startSpeechRecognition}>
+                Start Speech
+              </button>
+            </div>
+            <div className="transcript-box">
+              <h4>Transcript</h4>
+              <p>{transcript}</p>
             </div>
           </>
         ) : (
