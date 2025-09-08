@@ -18,10 +18,13 @@ const Call = () => {
   const [isCameraOn, setIsCameraOn] = useState(true);
 
   const [transcript, setTranscript] = useState("");
-  const recognizerRef = useRef(null);
+  const recognizersRef = useRef({}); // store multiple recognizers
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+
+  // Map to track which MediaStreamTrack belongs to which speaker
+  const trackSpeakerMap = useRef({});
 
   // Fetch all users
   useEffect(() => {
@@ -107,31 +110,47 @@ const Call = () => {
       setRoom(connectedRoom);
       toast.success(`Connected to room: ${roomName}`);
 
+      // Add local tracks
       connectedRoom.localParticipant.tracks.forEach((publication) => {
         const track = publication.track;
-        if (track) attachTracks([track], localVideoRef.current);
+        if (track) {
+          attachTracks([track], localVideoRef.current);
+          if (track.kind === "audio") {
+            trackSpeakerMap.current[track.mediaStreamTrack.id] = "You";
+          }
+        }
       });
 
-      connectedRoom.participants.forEach((participant) => {
+      // Subscribe remote
+      const subscribeParticipantTracks = (participant) => {
         participant.tracks.forEach((pub) => {
-          if (pub.track) attachTracks([pub.track], remoteVideoRef.current);
+          if (pub.track) {
+            attachTracks([pub.track], remoteVideoRef.current);
+            if (pub.kind === "audio") {
+              trackSpeakerMap.current[pub.track.mediaStreamTrack.id] =
+                participant.identity;
+            }
+          }
         });
 
-        participant.on("trackSubscribed", (track) =>
-          attachTracks([track], remoteVideoRef.current)
-        );
-        participant.on("trackUnsubscribed", (track) => detachTracks([track]));
-      });
-
-      connectedRoom.on("participantConnected", (participant) => {
-        participant.tracks.forEach((pub) => {
-          if (pub.track) attachTracks([pub.track], remoteVideoRef.current);
+        participant.on("trackSubscribed", (track) => {
+          attachTracks([track], remoteVideoRef.current);
+          if (track.kind === "audio") {
+            trackSpeakerMap.current[track.mediaStreamTrack.id] =
+              participant.identity;
+          }
         });
-        participant.on("trackSubscribed", (track) =>
-          attachTracks([track], remoteVideoRef.current)
-        );
-        participant.on("trackUnsubscribed", (track) => detachTracks([track]));
-      });
+
+        participant.on("trackUnsubscribed", (track) => {
+          detachTracks([track]);
+          if (track.kind === "audio") {
+            delete trackSpeakerMap.current[track.mediaStreamTrack.id];
+          }
+        });
+      };
+
+      connectedRoom.participants.forEach(subscribeParticipantTracks);
+      connectedRoom.on("participantConnected", subscribeParticipantTracks);
 
       connectedRoom.on("participantDisconnected", (participant) => {
         participant.tracks.forEach((pub) => {
@@ -156,6 +175,8 @@ const Call = () => {
         setSelectedUser(null);
         setIsMuted(false);
         setIsCameraOn(true);
+        recognizersRef.current = {};
+        trackSpeakerMap.current = {};
       });
     } catch (err) {
       console.error("Video call error:", err);
@@ -173,12 +194,14 @@ const Call = () => {
         console.error("Error ending call:", err);
       }
     }
-    // Stop speech recognition too
-    if (recognizerRef.current) {
-      recognizerRef.current.stopContinuousRecognitionAsync();
-      recognizerRef.current = null;
-    }
+
+    // Stop all recognizers
+    Object.values(recognizersRef.current).forEach((rec) => {
+      rec.stopContinuousRecognitionAsync();
+    });
+    recognizersRef.current = {};
     setTranscript("");
+    trackSpeakerMap.current = {};
   };
 
   // Toggle mute/unmute
@@ -215,7 +238,7 @@ const Call = () => {
     toast(newState ? "Camera On" : "Camera Off");
   };
 
-  // Start speech recognition
+  // Start speech recognition per track with labels
   const startSpeechRecognition = async () => {
     try {
       const { data } = await API.get("/token/speech");
@@ -225,29 +248,68 @@ const Call = () => {
       );
       speechConfig.speechRecognitionLanguage = "en-US";
 
-      const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-      const recognizer = new SpeechSDK.SpeechRecognizer(
-        speechConfig,
-        audioConfig
-      );
+      // All audio tracks from local + remote participants
+      const audioTracks = [];
+      if (room) {
+        room.localParticipant.audioTracks.forEach((pub) => {
+          if (pub.track) audioTracks.push(pub.track);
+        });
+        room.participants.forEach((participant) => {
+          participant.tracks.forEach((pub) => {
+            if (pub.track && pub.kind === "audio") audioTracks.push(pub.track);
+          });
+        });
+      }
 
-      recognizer.recognizing = (_, e) => {
-        if (e.result.reason === SpeechSDK.ResultReason.RecognizingSpeech) {
-          setTranscript((prev) => prev + " " + e.result.text);
-        }
-      };
+      if (audioTracks.length === 0) {
+        toast.error("No audio tracks available");
+        return;
+      }
 
-      recognizer.recognized = (_, e) => {
-        if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
-          setTranscript((prev) => prev + " " + e.result.text);
-        }
-      };
+      // Create recognizer per track
+      for (const track of audioTracks) {
+        if (recognizersRef.current[track.mediaStreamTrack.id]) continue;
 
-      console.log(transcript);
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(
+          new MediaStream([track.mediaStreamTrack])
+        );
+        const destination = audioContext.createMediaStreamDestination();
+        source.connect(destination);
 
-      recognizer.startContinuousRecognitionAsync();
-      recognizerRef.current = recognizer;
-      toast("Speech recognition started");
+        const audioConfig = SpeechSDK.AudioConfig.fromStreamInput(
+          destination.stream
+        );
+
+        const recognizer = new SpeechSDK.SpeechRecognizer(
+          speechConfig,
+          audioConfig
+        );
+
+        const speakerName =
+          trackSpeakerMap.current[track.mediaStreamTrack.id] || "Unknown";
+
+        recognizer.recognizing = (_, e) => {
+          if (e.result.reason === SpeechSDK.ResultReason.RecognizingSpeech) {
+            setTranscript(
+              (prev) => prev + ` [${speakerName}] ${e.result.text}`
+            );
+          }
+        };
+
+        recognizer.recognized = (_, e) => {
+          if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+            setTranscript(
+              (prev) => prev + ` [${speakerName}] ${e.result.text}`
+            );
+          }
+        };
+
+        recognizer.startContinuousRecognitionAsync();
+        recognizersRef.current[track.mediaStreamTrack.id] = recognizer;
+      }
+
+      toast("Speech recognition started with speaker labels");
     } catch (err) {
       console.error("Speech recognition error:", err);
       toast.error("Speech recognition failed");
