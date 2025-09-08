@@ -1,21 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import API from "../../axios";
 import { useSocket } from "../../context/SocketContext";
-import { Device } from "@twilio/voice-sdk";
+import Video from "twilio-video";
 import toast from "react-hot-toast";
 import "./Call.css";
 
 const Call = () => {
   const socket = useSocket();
+
   const [allUsers, setAllUsers] = useState([]);
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [selectedUser, setSelectedUser] = useState(null);
-  const [device, setDevice] = useState(null);
-  const [activeConnection, setActiveConnection] = useState(null);
-  const [incomingCall, setIncomingCall] = useState(null);
-  const [isMuted, setIsMuted] = useState(false);
+  const [room, setRoom] = useState(null);
   const [currentUserId, setCurrentUserId] = useState(null);
-  const [isDeviceReady, setIsDeviceReady] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isCameraOn, setIsCameraOn] = useState(true);
+
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
 
   // Fetch all users
   useEffect(() => {
@@ -38,148 +40,200 @@ const Call = () => {
     return () => socket.off("onlineUsers");
   }, [socket]);
 
-  // Setup Twilio Device (called only after button click)
-  const setupDevice = async () => {
-    try {
-      console.log("setupDevice called");
-
-      const tokenRes = await API.get("/token/voice");
-      const token = tokenRes.data.token;
-
-      setCurrentUserId(tokenRes.data.identity);
-
-      console.log("Got token:", tokenRes.data.identity);
-
-      const twilioDevice = new Device(token, {
-        codecPreferences: ["opus", "pcmu"],
-        debug: true,
-      });
-
-      console.log(1);
-
-      twilioDevice.on("registered", () => {
-        console.log("is this coming");
-        console.log("Twilio Device is registered");
-      });
-
-      console.log(2);
-
-      // Incoming call event
-      twilioDevice.on("incoming", (call) => {
-        console.log("Incoming call event fired");
-        toast("Incoming call...");
-        setIncomingCall(call);
-      });
-
-      console.log(3);
-
-      twilioDevice.on("error", (err) =>
-        console.error("Twilio Device error:", err)
-      );
-
-      // IMPORTANT: register the device with Twilio
-      await twilioDevice.register();
-      console.log("Device.register() finished");
-
-      setDevice(twilioDevice);
-      setIsDeviceReady(true);
-
-      console.log(4);
-    } catch (err) {
-      console.error("Error setting up Twilio Device:", err);
-      toast.error("Failed to setup call device");
-    }
+  // Helper: attach track(s) to a container
+  const attachTracks = (tracks = [], container) => {
+    if (!container) return;
+    tracks.forEach((track) => {
+      const attached = track.attach();
+      // attach() can return an element or an array
+      if (Array.isArray(attached)) {
+        attached.forEach((el) => container.appendChild(el));
+      } else if (attached) {
+        container.appendChild(attached);
+      }
+    });
   };
 
-  // Start outgoing call
-  const handleCall = async (recId) => {
-    if (!device) {
-      toast.error("Call device not ready");
-      return;
-    }
+  // Helper: detach & stop track(s)
+  const detachTracks = (tracks = []) => {
+    tracks.forEach((track) => {
+      try {
+        const elems = track.detach();
+        elems.forEach((el) => el.remove());
+      } catch (err) {
+        // ignore if detach fails
+        console.log(err);
+      }
+      if (typeof track.stop === "function") {
+        try {
+          track.stop();
+        } catch (err) {
+          // ignore
+          console.log(err);
+        }
+      }
+    });
+  };
 
+  // Build deterministic room name so both peers join same room
+  const getRoomName = (myId, otherId) => {
+    if (!myId) return `${otherId}`; // fallback
+    const pair = [myId.toString(), otherId.toString()].sort();
+    return `${pair[0]}_${pair[1]}`;
+  };
+
+  // Start video call (caller side)
+  const startVideoCall = async (recId) => {
     try {
-      console.log(5);
-      const conn = await device.connect({ params: { To: recId } });
-      setActiveConnection(conn);
+      // Request a token (no room param required)
+      const tokenRes = await API.get("/token/video");
+      const token = tokenRes.data.token;
+      const identity = tokenRes.data.identity;
+
+      // Save identity (fixes earlier eslint unused setCurrentUserId)
+      setCurrentUserId(identity);
+
+      // deterministic room name so both parties can join same room
+      const roomName = getRoomName(identity, recId);
+
       setSelectedUser(recId);
 
-      console.log(6);
-
-      conn.on("accept", () => toast.success(`In call with ${recId}`));
-      conn.on("disconnect", () => {
-        toast("Call ended");
-        cleanupCallState();
+      const connectedRoom = await Video.connect(token, {
+        name: roomName,
+        audio: true,
+        video: { width: 640 },
       });
-      console.log(7);
+
+      // Clear any previous UI
+      if (localVideoRef.current) localVideoRef.current.innerHTML = "";
+      if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
+
+      setRoom(connectedRoom);
+      toast.success(`Connected to room: ${roomName}`);
+
+      // attach local participant's existing tracks
+      connectedRoom.localParticipant.tracks.forEach((publication) => {
+        const track = publication.track;
+        if (track) attachTracks([track], localVideoRef.current);
+      });
+
+      // attach tracks of participants already in the room
+      connectedRoom.participants.forEach((participant) => {
+        participant.tracks.forEach((pub) => {
+          if (pub.track) attachTracks([pub.track], remoteVideoRef.current);
+        });
+
+        // subscribe to future track events
+        participant.on("trackSubscribed", (track) =>
+          attachTracks([track], remoteVideoRef.current)
+        );
+        participant.on("trackUnsubscribed", (track) => detachTracks([track]));
+      });
+
+      // When a new participant connects
+      connectedRoom.on("participantConnected", (participant) => {
+        participant.tracks.forEach((pub) => {
+          if (pub.track) attachTracks([pub.track], remoteVideoRef.current);
+        });
+        participant.on("trackSubscribed", (track) =>
+          attachTracks([track], remoteVideoRef.current)
+        );
+        participant.on("trackUnsubscribed", (track) => detachTracks([track]));
+      });
+
+      // When a participant disconnects
+      connectedRoom.on("participantDisconnected", (participant) => {
+        participant.tracks.forEach((pub) => {
+          if (pub.track) detachTracks([pub.track]);
+        });
+      });
+
+      // Cleanup when the room itself disconnects for this client
+      connectedRoom.on("disconnected", (roomObj) => {
+        // detach and stop local tracks
+        roomObj.localParticipant.tracks.forEach((publication) => {
+          if (publication.track) detachTracks([publication.track]);
+        });
+
+        // detach remote tracks
+        roomObj.participants.forEach((participant) => {
+          participant.tracks.forEach((pub) => {
+            if (pub.track) detachTracks([pub.track]);
+          });
+        });
+
+        // clear UI
+        if (localVideoRef.current) localVideoRef.current.innerHTML = "";
+        if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
+
+        setRoom(null);
+        setSelectedUser(null);
+        setIsMuted(false);
+        setIsCameraOn(true);
+      });
     } catch (err) {
-      console.error("Call failed:", err);
-      toast.error("Failed to start call");
+      console.error("Video call error:", err);
+      toast.error("Failed to start video call");
     }
   };
 
-  // Answer incoming call
-  const handleAnswerCall = () => {
-    console.log(8);
-    if (!incomingCall) return;
-    incomingCall.accept();
-    setActiveConnection(incomingCall);
-    setSelectedUser(incomingCall.parameters.From);
-    setIncomingCall(null);
-
-    console.log(9);
-
-    incomingCall.on("disconnect", () => {
-      toast("Call ended");
-      cleanupCallState();
-    });
-
-    toast.success("Call answered");
-  };
-
-  // Reject incoming call
-  const handleRejectCall = () => {
-    if (!incomingCall) return;
-    incomingCall.reject();
-    setIncomingCall(null);
-    toast("Call rejected");
-  };
-
-  // End active call
+  // End call
   const handleEndCall = () => {
-    if (activeConnection) {
-      activeConnection.disconnect();
-      toast("Call ended");
+    if (room) {
+      try {
+        // force disconnect; 'disconnected' handler will clean up tracks/UI
+        room.disconnect();
+        toast("Call ended");
+      } catch (err) {
+        console.error("Error ending call:", err);
+        // attempt manual cleanup
+        room.localParticipant.tracks.forEach((pub) => {
+          if (pub.track) detachTracks([pub.track]);
+        });
+        if (localVideoRef.current) localVideoRef.current.innerHTML = "";
+        if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = "";
+        setRoom(null);
+        setSelectedUser(null);
+      }
     }
-    cleanupCallState();
   };
 
-  // Toggle mute
+  // Toggle mute/unmute
   const handleMuteToggle = () => {
-    if (!activeConnection) return;
-    const newMuteState = !isMuted;
-    activeConnection.mute(newMuteState);
-    setIsMuted(newMuteState);
-    toast(newMuteState ? "Muted" : "Unmuted");
+    if (!room) return;
+    const newMute = !isMuted;
+    room.localParticipant.audioTracks.forEach((pub) => {
+      const track = pub.track;
+      if (!track) return;
+      try {
+        newMute ? track.disable() : track.enable();
+      } catch (err) {
+        console.warn("Audio toggle error:", err);
+      }
+    });
+    setIsMuted(newMute);
+    toast(newMute ? "Muted" : "Unmuted");
   };
 
-  // Reset call state
-  const cleanupCallState = () => {
-    setActiveConnection(null);
-    setSelectedUser(null);
-    setIsMuted(false);
+  // Toggle camera on/off
+  const handleCameraToggle = () => {
+    if (!room) return;
+    const newState = !isCameraOn;
+    room.localParticipant.videoTracks.forEach((pub) => {
+      const track = pub.track;
+      if (!track) return;
+      try {
+        newState ? track.enable() : track.disable();
+      } catch (err) {
+        console.warn("Video toggle error:", err);
+      }
+    });
+    setIsCameraOn(newState);
+    toast(newState ? "Camera On" : "Camera Off");
   };
 
   return (
     <div className="call-container">
-      {!isDeviceReady && (
-        <div className="setup-box">
-          <button onClick={setupDevice} className="setup-btn">
-            Enable Calling
-          </button>
-        </div>
-      )}
-
       <div className="users-section">
         <h3>All Users</h3>
         <ul>
@@ -201,10 +255,10 @@ const Call = () => {
                 <span>{user.name}</span>
                 <button
                   className="call-btn"
-                  onClick={() => handleCall(user._id)}
-                  disabled={!isDeviceReady}
+                  onClick={() => startVideoCall(user._id)}
+                  disabled={!!room}
                 >
-                  📞
+                  camera
                 </button>
               </li>
             ))}
@@ -212,21 +266,13 @@ const Call = () => {
       </div>
 
       <div className="call-box">
-        {incomingCall ? (
+        {room ? (
           <>
-            <h2>Incoming Call...</h2>
-            <div className="call-controls">
-              <button className="answer-btn" onClick={handleAnswerCall}>
-                Answer
-              </button>
-              <button className="reject-btn" onClick={handleRejectCall}>
-                Reject
-              </button>
+            <h2>In Video Call with {selectedUser}</h2>
+            <div className="video-wrapper">
+              <div className="local-video" ref={localVideoRef}></div>
+              <div className="remote-video" ref={remoteVideoRef}></div>
             </div>
-          </>
-        ) : selectedUser ? (
-          <>
-            <h2>In Call with {selectedUser}</h2>
             <div className="call-controls">
               <button className="end-btn" onClick={handleEndCall}>
                 End Call
@@ -234,7 +280,9 @@ const Call = () => {
               <button className="mute-btn" onClick={handleMuteToggle}>
                 {isMuted ? "Unmute" : "Mute"}
               </button>
-              <button className="video-btn">📷 (soon)</button>
+              <button className="video-btn" onClick={handleCameraToggle}>
+                {isCameraOn ? "Camera Off" : "Camera On"}
+              </button>
             </div>
           </>
         ) : (
